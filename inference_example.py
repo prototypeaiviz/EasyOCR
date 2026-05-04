@@ -20,7 +20,7 @@ import math
 
 # ── 0. CONFIG ─────────────────────────────────────────────────────────────────
 
-IMAGE_PATH = sys.argv[1] if len(sys.argv) > 1 else "your_image.png"
+IMAGE_PATH = "/media/mostafahaggag/D/Projects_ubuntu/EasyOCR/examples_aiviz_dataset/A7kL2 p9Qx__03.png"
 
 # Change to whatever language(s) your image contains.
 # Common options: ['en'], ['en','ar'], ['ch_sim','en'], etc.
@@ -47,7 +47,7 @@ print("STEP 1 — Loading model via easyocr.Reader")
 print("="*70)
 
 import easyocr
-reader = easyocr.Reader(LANGUAGE, gpu=False, verbose=False)
+reader = easyocr.Reader(LANGUAGE, gpu=True, verbose=False)
 
 # After Reader.__init__:
 #   reader.recognizer  → the nn.Module (Model class)
@@ -98,6 +98,7 @@ print(f"After ToTensor + normalise: {tuple(img_tensor.shape)}  range [{img_tenso
 C, H, W = img_tensor.shape
 pad_img = torch.FloatTensor(1, H, IMG_W).fill_(0)
 pad_img[:, :, :W] = img_tensor
+# putting the last part equal to the latest pixel value
 if IMG_W > W:
     pad_img[:, :, W:] = img_tensor[:, :, W-1].unsqueeze(2).expand(C, H, IMG_W - W)
 
@@ -180,6 +181,7 @@ with torch.no_grad():
           f"(class {preds_prob_np[0,0].argmax()} = '{converter.character[preds_prob_np[0,0].argmax()]}')")
 
     # ignore_idx: blank (0) + any separator tokens
+    # they are tokens that we are not putting into considerations as the are padding tokens.
     ignore_idx = converter.ignore_idx
     preds_prob_np[:, :, ignore_idx] = 0.0       # zero out — they can't win argmax
 
@@ -202,6 +204,7 @@ with torch.no_grad():
         # At each time step take argmax → index of most probable class
         _, preds_index = preds_prob_t.max(2)           # [B, T]
         print(f"Argmax indices (raw, before CTC collapse):")
+        # you ahve 1 by 79
         print(f"  {preds_index[0].tolist()}")
         print(f"  Corresponding chars: {[converter.character[i] for i in preds_index[0].tolist()]}")
 
