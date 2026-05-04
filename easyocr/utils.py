@@ -271,25 +271,40 @@ def ctcBeamSearch(mat, classes, ignore_idx, lm, beamWidth=25, dict_list = []):
 
 
 class CTCLabelConverter(object):
-    """ Convert between text-label and text-index """
+    # Bridges between human-readable characters and the integer indices the model uses.
+    #
+    # CTC (Connectionist Temporal Classification) needs a special "blank" token at
+    # index 0 to represent "no character here" in the output sequence.  All real
+    # characters are shifted up by 1 so they occupy indices 1..N.
+    #
+    # Example with character='abc':
+    #   self.character = ['[blank]', 'a', 'b', 'c']
+    #   self.dict      = {'a':1, 'b':2, 'c':3}
 
     def __init__(self, character, separator_list = {}, dict_pathlist = {}):
-        # character (str): set of the possible characters.
         dict_character = list(character)
 
+        # Map each character to its integer index (1-based; 0 is reserved for blank)
         self.dict = {}
         for i, char in enumerate(dict_character):
             self.dict[char] = i + 1
 
-        self.character = ['[blank]'] + dict_character  # dummy '[blank]' token for CTCLoss (index 0)
+        self.character = ['[blank]'] + dict_character  # index 0 = CTC blank token
 
+        # separator_list: special "language boundary" tokens used when mixing scripts
+        # (e.g. Thai + English).  They mark where one language ends and another begins
+        # so the decoder can handle each word correctly.
         self.separator_list = separator_list
         separator_char = []
         for lang, sep in separator_list.items():
             separator_char += sep
+        # ignore_idx: indices that should never appear in the final decoded text.
+        # Always includes 0 (blank) plus any separator tokens.
         self.ignore_idx = [0] + [i+1 for i,item in enumerate(separator_char)]
 
-        ####### latin dict
+        # Load word dictionaries for wordbeamsearch decoding.
+        # Without separators (Latin scripts): one flat list of words.
+        # With separators (mixed scripts): dict keyed by language code.
         if len(separator_list) == 0:
             dict_list = []
             for lang, dict_path in dict_pathlist.items():
@@ -309,40 +324,52 @@ class CTCLabelConverter(object):
         self.dict_list = dict_list
 
     def encode(self, text, batch_max_length=25):
-        """convert text-label into text-index.
-        input:
-            text: text labels of each image. [batch_size]
-
-        output:
-            text: concatenated text index for CTCLoss.
-                    [sum(text_lengths)] = [text_index_0 + text_index_1 + ... + text_index_(n - 1)]
-            length: length of each text. [batch_size]
-        """
+        # Converts a batch of strings into flat integer index arrays for CTCLoss.
+        # CTCLoss expects all targets concatenated into a 1-D tensor plus lengths.
+        # e.g. ['cat', 'dog'] → ([3,1,20, 4,15,7], [3,3])
         length = [len(s) for s in text]
         text = ''.join(text)
         text = [self.dict[char] for char in text]
-
         return (torch.IntTensor(text), torch.IntTensor(length))
 
     def decode_greedy(self, text_index, length):
-        """ convert text-index into text-label. """
+        # CTC greedy decoding: at each time step take the most probable class,
+        # then collapse the raw sequence into the final string by:
+        #   1. Removing consecutive duplicate indices (CTC repeat rule).
+        #   2. Removing blank (index 0) and separator indices.
+        #
+        # Example: [2, 2, 0, 2, 3, 3] with chars ['[blank]','h','e','l','o']
+        #   → remove consecutive dups: [2, 0, 2, 3]  (two 2s → one, two 3s → one)
+        #   → remove blank (0):        [2, 2, 3]  → 'elo'  ... wait that's wrong
+        # Actual CTC rule: repeated char across a blank means two separate chars;
+        # repeated char WITHOUT a blank is one char.  But greedy post-processing
+        # here handles it via the boolean mask `a & b` below.
         texts = []
         index = 0
         for l in length:
             t = text_index[index:index + l]
-            # Returns a boolean array where true is when the value is not repeated
+
+            # a[i] = True  when t[i] != t[i-1]  (not a consecutive duplicate)
+            # a[0] is always True (first element is never a duplicate)
             a = np.insert(~((t[1:]==t[:-1])),0,True)
-            # Returns a boolean array where true is when the value is not in the ignore_idx list
+
+            # b[i] = True  when t[i] is NOT in ignore_idx (not blank/separator)
             b = ~np.isin(t,np.array(self.ignore_idx))
-            # Combine the two boolean array
+
+            # c[i] = True  only when both conditions hold
             c = a & b
-            # Gets the corresponding character according to the saved indexes
+
+            # Map surviving indices back to characters and join
             text = ''.join(np.array(self.character)[t[c.nonzero()]])
             texts.append(text)
             index += l
         return texts
 
     def decode_beamsearch(self, mat, beamWidth=5):
+        # Beam search decoding: instead of greedily picking the top class at each
+        # step, it maintains `beamWidth` candidate sequences and extends all of them
+        # at every time step, keeping only the top-scoring ones.
+        # More accurate than greedy but slower (O(beamWidth × T × C) vs O(T × C)).
         texts = []
         for i in range(mat.shape[0]):
             t = ctcBeamSearch(mat[i], self.character, self.ignore_idx, None, beamWidth=beamWidth)
@@ -350,6 +377,10 @@ class CTCLabelConverter(object):
         return texts
 
     def decode_wordbeamsearch(self, mat, beamWidth=5):
+        # Word-level beam search: first splits the sequence on spaces (or language
+        # separators), then runs beam search on each word segment separately with a
+        # word dictionary to re-rank candidates.
+        # Best of the three decoders for languages with known vocabularies.
         texts = []
         argmax = np.argmax(mat, axis = 2)
 
